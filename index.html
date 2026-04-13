@@ -319,6 +319,23 @@
       line-height: 1.62;
     }
 
+    .app-version {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px dashed #d7e3f4;
+      background: #ffffff;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #6a7e9f;
+    }
+
+    .app-version strong {
+      color: #2f4464;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+
     .topbar {
       grid-column: 2;
       border-bottom: 1px solid var(--line);
@@ -2405,6 +2422,10 @@
           角色：<span id="authRole">-</span><br />
           班次状态：在线值守
         </div>
+        <div class="app-version">
+          <strong>版本：</strong><span id="appVersionLabel">-</span><br />
+          <strong>更新时间：</strong><span id="appVersionTime">-</span>
+        </div>
       </div>
     </aside>
 
@@ -2772,11 +2793,11 @@
                 <h4>校验规则</h4>
                 <div class="field">
                   <label for="tplBlockingFields">阻断项字段（逗号分隔）</label>
-                  <textarea id="tplBlockingFields" placeholder="订单编号, 主商品ID, 商品价格, 商品数量, 收货人, 收货电话, 地址解析"></textarea>
+                  <textarea id="tplBlockingFields" placeholder="订单编号, 主商品ID, 商品数量"></textarea>
                 </div>
                 <div class="field">
                   <label for="tplFixableFields">可修正项字段（逗号分隔）</label>
-                  <textarea id="tplFixableFields" placeholder="收货电话, 地址解析"></textarea>
+                  <textarea id="tplFixableFields" placeholder="商品价格, 收货人, 收货电话, 地址解析"></textarea>
                 </div>
                 <div class="field">
                   <label for="tplHintFields">提示项字段（逗号分隔）</label>
@@ -3509,6 +3530,8 @@
     const DEMO_AUTH_STORAGE_KEY = "tmzq_demo_auth_v1";
     const DEFAULT_DEMO_EMPLOYEE_NO = "1000096";
     const DEFAULT_DEMO_PASSWORD = "123456";
+    const APP_VERSION = "v2026.04.13-r6";
+    const APP_VERSION_TIME = "2026-04-13 19:12";
     let appInitialized = false;
     let authEventsBound = false;
 
@@ -3580,6 +3603,10 @@
 
     const REQUIRED_ORDER_FIELDS = ["订单编号", "主商品ID", "商品数量", "收货人", "收货电话", "收货地址"];
     const FILL_DOWN_FIELDS = ["订单编号", "订单实付金额", "订单运费", "订单优惠金额", "收货人", "收货电话", "省", "市", "区", "收货地址", "发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"];
+    const LEGACY_STRICT_BLOCKING_FIELDS = ["订单编号", "主商品ID", "商品价格", "商品数量", "收货人", "收货电话", "地址解析"];
+    const DEFAULT_BLOCKING_FIELDS = ["订单编号", "主商品ID", "商品数量"];
+    const DEFAULT_FIXABLE_FIELDS = ["商品价格", "收货人", "收货电话", "地址解析"];
+    const DEFAULT_HINT_FIELDS = ["发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"];
 
     const DEFAULT_ALIAS_MAP = {
       "订单编号": ["订单编号", "订单号", "外部订单号", "第三方订单号", "external_order_no", "order_no", "orderno", "orderid"],
@@ -3602,6 +3629,39 @@
       "纳税人识别号": ["纳税人识别号", "税号", "invoice_tax_no", "tax_no"],
       "指定仓": ["指定仓", "仓", "warehouse", "仓别"]
     };
+
+    function fieldListEquals(listA = [], listB = []) {
+      if (listA.length !== listB.length) return false;
+      const a = [...listA].map(item => String(item || "").trim());
+      const b = [...listB].map(item => String(item || "").trim());
+      return a.every((item, idx) => item === b[idx]);
+    }
+
+    function normalizeValidationPolicy(validation = {}) {
+      const rawBlocking = Array.isArray(validation.blockingFields)
+        ? validation.blockingFields.map(item => String(item || "").trim()).filter(Boolean)
+        : [];
+      const rawFixable = Array.isArray(validation.fixableFields)
+        ? validation.fixableFields.map(item => String(item || "").trim()).filter(Boolean)
+        : [];
+      const rawHint = Array.isArray(validation.hintFields)
+        ? validation.hintFields.map(item => String(item || "").trim()).filter(Boolean)
+        : [];
+      let blockingFields = rawBlocking.length ? rawBlocking : [...DEFAULT_BLOCKING_FIELDS];
+      let fixableFields = rawFixable.length ? rawFixable : [...DEFAULT_FIXABLE_FIELDS];
+      const hintFields = rawHint.length ? rawHint : [...DEFAULT_HINT_FIELDS];
+      const customBlocking = validation.customBlocking === true;
+      if (!customBlocking && fieldListEquals(blockingFields, LEGACY_STRICT_BLOCKING_FIELDS)) {
+        blockingFields = [...DEFAULT_BLOCKING_FIELDS];
+        fixableFields = Array.from(new Set([...fixableFields, ...DEFAULT_FIXABLE_FIELDS]));
+      }
+      return {
+        blockingFields,
+        fixableFields,
+        hintFields,
+        customBlocking
+      };
+    }
 
     function createDefaultProfile(name = "外部平台A-默认映射") {
       const fields = {};
@@ -3796,6 +3856,13 @@
       if (nameEl) nameEl.textContent = user ? user.name : "-";
       if (noEl) noEl.textContent = user ? user.employeeNo : "-";
       if (roleEl) roleEl.textContent = user ? roleLabel(user.role) : "-";
+    }
+
+    function renderAppVersion() {
+      const versionEl = byId("appVersionLabel");
+      const timeEl = byId("appVersionTime");
+      if (versionEl) versionEl.textContent = APP_VERSION;
+      if (timeEl) timeEl.textContent = APP_VERSION_TIME;
     }
 
     function setWriteControlsVisible(enabled) {
@@ -4433,6 +4500,7 @@
         mergedModes[field] = incomingModes[field] || defaultTransformModes[field] || "direct";
       });
       const validation = seed.validation && typeof seed.validation === "object" ? seed.validation : {};
+      const normalizedValidation = normalizeValidationPolicy(validation);
       return {
         id,
         ruleName: seed.ruleName || base.name,
@@ -4457,11 +4525,7 @@
         detectedHeaders: Array.isArray(seed.detectedHeaders) ? seed.detectedHeaders.map(i => String(i || "").trim()).filter(Boolean) : [],
         enableSkuMapping: seed.enableSkuMapping !== false,
         transformModes: mergedModes,
-        validation: {
-          blockingFields: Array.isArray(validation.blockingFields) ? validation.blockingFields : ["订单编号", "主商品ID", "商品价格", "商品数量", "收货人", "收货电话", "地址解析"],
-          fixableFields: Array.isArray(validation.fixableFields) ? validation.fixableFields : ["收货电话", "地址解析"],
-          hintFields: Array.isArray(validation.hintFields) ? validation.hintFields : ["发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"]
-        },
+        validation: normalizedValidation,
         createdAt: seed.createdAt || new Date().toISOString(),
         updatedAt: seed.updatedAt || new Date().toISOString()
       };
@@ -5432,11 +5496,12 @@
       const blockingFields = parseFieldList(byId("tplBlockingFields").value);
       const fixableFields = parseFieldList(byId("tplFixableFields").value);
       const hintFields = parseFieldList(byId("tplHintFields").value);
-      current.validation = {
-        blockingFields: blockingFields.length ? blockingFields : ["订单编号", "主商品ID", "商品价格", "商品数量", "收货人", "收货电话", "地址解析"],
-        fixableFields: fixableFields.length ? fixableFields : ["收货电话", "地址解析"],
-        hintFields: hintFields.length ? hintFields : ["发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"]
-      };
+      current.validation = normalizeValidationPolicy({
+        blockingFields,
+        fixableFields,
+        hintFields,
+        customBlocking: String(byId("tplBlockingFields").value || "").trim().length > 0
+      });
       current.templateKeywords = Array.from(new Set([
         mallName,
         ...(state.templateDetectedHeaders || []).slice(0, 6)
@@ -5905,9 +5970,10 @@
       const mappingRows = Array.isArray(options.mappingRows) ? options.mappingRows : state.mappings;
       const mappingMallName = String(options.mappingMallName || "").trim();
       const validation = profile.validation || {};
-      const blockingFields = normalizeRuleFieldList(validation.blockingFields, ["订单编号", "主商品ID", "商品价格", "商品数量", "收货人", "收货电话", "地址解析"]);
-      const fixableFields = normalizeRuleFieldList(validation.fixableFields, ["收货电话", "地址解析"]);
-      const hintFields = normalizeRuleFieldList(validation.hintFields, ["发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"]);
+      const normalizedValidation = normalizeValidationPolicy(validation);
+      const blockingFields = normalizeRuleFieldList(normalizedValidation.blockingFields, DEFAULT_BLOCKING_FIELDS);
+      const fixableFields = normalizeRuleFieldList(normalizedValidation.fixableFields, DEFAULT_FIXABLE_FIELDS);
+      const hintFields = normalizeRuleFieldList(normalizedValidation.hintFields, DEFAULT_HINT_FIELDS);
       const blockingSet = new Set(blockingFields.map(normalizeIssueFieldName));
       const fixableSet = new Set(fixableFields.map(normalizeIssueFieldName));
       const hintSet = new Set(hintFields.map(normalizeIssueFieldName));
@@ -6592,6 +6658,7 @@
       const validation = rule && rule.validation && typeof rule.validation === "object"
         ? rule.validation
         : {};
+      const normalizedValidation = normalizeValidationPolicy(validation);
       const mappingKey = rule && rule.mappingKey && typeof rule.mappingKey === "object"
         ? rule.mappingKey
         : {};
@@ -6617,9 +6684,10 @@
         },
         enableSkuMapping: rule.enableSkuMapping !== false,
         validation: {
-          blockingFields: normalizeRuleFieldList(validation.blockingFields, ["订单编号", "主商品ID", "商品价格", "商品数量", "收货人", "收货电话", "地址解析"]),
-          fixableFields: normalizeRuleFieldList(validation.fixableFields, ["收货电话", "地址解析"]),
-          hintFields: normalizeRuleFieldList(validation.hintFields, ["发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"])
+          blockingFields: normalizeRuleFieldList(normalizedValidation.blockingFields, DEFAULT_BLOCKING_FIELDS),
+          fixableFields: normalizeRuleFieldList(normalizedValidation.fixableFields, DEFAULT_FIXABLE_FIELDS),
+          hintFields: normalizeRuleFieldList(normalizedValidation.hintFields, DEFAULT_HINT_FIELDS),
+          customBlocking: normalizedValidation.customBlocking === true
         },
         mappingKey: {
           field: String(mappingKey.field || "外部商品映射键").trim(),
@@ -8659,6 +8727,7 @@ ${topRisk}`;
     }
 
     function init() {
+      renderAppVersion();
       bindViewSwitch();
       bindJumpButtons();
       loadRulesFromStorage();
