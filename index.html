@@ -2812,10 +2812,14 @@
               </div>
             </div>
           </div>
-          <div class="grid-2">
+          <div class="grid-3">
             <div class="field">
               <label for="execRuleSelect">平台模板选择</label>
               <select id="execRuleSelect"></select>
+            </div>
+            <div class="field">
+              <label for="execMappingSelect">商品映射选择</label>
+              <select id="execMappingSelect"></select>
             </div>
             <div class="field">
               <label for="execFile">上传外部订单文件（CSV/XLSX）</label>
@@ -4610,6 +4614,7 @@
         option.value = "";
         option.textContent = "暂无启用规则";
         select.appendChild(option);
+        refreshExecMappingSelect();
         setStatus("templateStatus", "暂无启用规则，请先在“平台模板中心”完成提交确认。", "warn");
         updateExecFlow();
         return;
@@ -4629,6 +4634,8 @@
       if (selected) {
         setStatus("templateStatus", `当前执行规则：${selected.mallName} / ${selected.ruleName}`, "ok");
       }
+      refreshExecMappingSelect();
+      renderSkuMappingSummary(null);
       updateExecFlow();
     }
 
@@ -6431,10 +6438,12 @@
       if (!normalizeMeta || !normalizeMeta.productMapping) {
         const execRule = getSelectedExecRule();
         const mallName = execRule ? String(execRule.mallName || "").trim() : "";
-        const scopedResult = resolveExecMappings(mallName);
-        const scoped = scopedResult.rows || [];
+        const scopedCtx = getSelectedExecMappingContext(mallName);
+        const scoped = scopedCtx.rows || [];
         const poolLabel = mallName ? `${mallName}商品池` : "当前商品池";
-        const modeHint = scopedResult.matchMode === "platform_name" ? "（按平台名称匹配）" : "";
+        const modeHint = scopedCtx.matchMode === "manual"
+          ? `（手工选择：${scopedCtx.label}）`
+          : (scopedCtx.matchMode === "platform_name" ? "（按平台名称匹配）" : "");
         box.textContent = `商品池映射状态：等待导单执行。${poolLabel} ${scoped.length} 条${modeHint}。`;
         box.className = "status sku-summary";
         return;
@@ -6543,14 +6552,21 @@
       const profile = toRuleProfile(rule);
       const execMallName = String(rule.mallName || "").trim();
       const resolvedMappings = profile.enableSkuMapping !== false
-        ? resolveExecMappings(execMallName)
+        ? getSelectedExecMappingContext(execMallName)
         : { rows: [], matchMode: "none" };
       const scopedMappings = resolvedMappings.rows || [];
       if (profile.enableSkuMapping !== false && scopedMappings.length === 0) {
         const mallHint = execMallName ? `「${execMallName}」` : "当前";
-        setStatus("orderStatus", `${mallHint}未找到可用商品映射。请在“商品映射中心”新增同名商城，或将映射记录的平台名称调整为${mallHint}。`, "warn");
+        if (resolvedMappings.matchMode === "manual") {
+          setStatus("orderStatus", `当前手工选择的商品映射「${resolvedMappings.label || "未命名方案"}」为空，请切换映射或补齐映射后重试。`, "warn");
+        } else {
+          setStatus("orderStatus", `${mallHint}未找到可用商品映射。请在“商品映射中心”新增同名商城，或将映射记录的平台名称调整为${mallHint}。`, "warn");
+        }
         updateExecFlow();
         return;
+      }
+      if (resolvedMappings.matchMode === "manual") {
+        setStatus("templateStatus", `当前执行规则：${rule.mallName} / ${rule.ruleName}；映射来源：${resolvedMappings.label}`, "ok");
       }
       if (resolvedMappings.matchMode === "platform_name") {
         setStatus("templateStatus", `已按平台名称匹配商品映射：${execMallName}`, "ok");
@@ -6617,7 +6633,7 @@
       const normalized = normalizeOrders(sourceRows, profile, {
         enableSkuMapping: profile.enableSkuMapping !== false,
         mappingRows: scopedMappings,
-        mappingMallName: execMallName
+        mappingMallName: String(resolvedMappings.mallName || execMallName || "").trim()
       });
       const precheck = buildPrecheck(normalized.allRows, normalized);
       state.normalizedOrders = normalized.result;
@@ -6905,25 +6921,88 @@
         .map(item => cloneMappingItem(item));
     }
 
+    function listEnabledMappingPlans() {
+      const plans = [];
+      state.mappingMalls.forEach(mall => {
+        const enabledPlan = getEnabledPlan(mall);
+        if (!enabledPlan || !Array.isArray(enabledPlan.items)) return;
+        plans.push({
+          key: `${mall.id}::${enabledPlan.id}`,
+          mallId: mall.id,
+          mallName: String(mall.name || "").trim(),
+          planId: enabledPlan.id,
+          planName: String(enabledPlan.name || "").trim(),
+          rows: enabledPlan.items
+            .filter(item => item.enabled !== false)
+            .map(item => cloneMappingItem(item))
+        });
+      });
+      return plans;
+    }
+
     function resolveExecMappings(mallName = "") {
       const targetMall = String(mallName || "").trim();
       if (!targetMall) {
         return {
           rows: state.mappings.filter(item => item.enabled !== false).map(item => cloneMappingItem(item)),
-          matchMode: "global"
+          matchMode: "global",
+          label: "全局"
         };
       }
       const byMall = getEnabledMappingsByMallName(targetMall);
       if (byMall.length) {
-        return { rows: byMall, matchMode: "mall_name" };
+        return { rows: byMall, matchMode: "mall_name", label: `${targetMall}（按商城名）` };
       }
       const byPlatform = state.mappings
         .filter(item => item.enabled !== false && String(item.platform_name || "").trim() === targetMall)
         .map(item => cloneMappingItem(item));
       if (byPlatform.length) {
-        return { rows: byPlatform, matchMode: "platform_name" };
+        return { rows: byPlatform, matchMode: "platform_name", label: `${targetMall}（按平台名）` };
       }
-      return { rows: [], matchMode: "none" };
+      return { rows: [], matchMode: "none", label: targetMall };
+    }
+
+    function getSelectedExecMappingContext(execMallName = "") {
+      const select = byId("execMappingSelect");
+      const value = select ? String(select.value || "auto") : "auto";
+      if (!value || value === "auto") {
+        return resolveExecMappings(execMallName);
+      }
+      const [mallId, planId] = value.split("::");
+      const mall = getMallById(mallId || "");
+      const plan = mall ? getPlanById(mall, planId || "") : null;
+      if (!mall || !plan || !Array.isArray(plan.items)) {
+        return { rows: [], matchMode: "invalid", label: "手工选择" };
+      }
+      return {
+        rows: plan.items.filter(item => item.enabled !== false).map(item => cloneMappingItem(item)),
+        matchMode: "manual",
+        label: `${mall.name} / ${plan.name}`,
+        mallName: String(mall.name || "").trim()
+      };
+    }
+
+    function refreshExecMappingSelect() {
+      const select = byId("execMappingSelect");
+      if (!select) return;
+      const current = String(select.value || "auto");
+      const options = listEnabledMappingPlans();
+      select.innerHTML = "";
+      const auto = document.createElement("option");
+      auto.value = "auto";
+      auto.textContent = "自动匹配（按模板商城）";
+      select.appendChild(auto);
+      options.forEach(item => {
+        const option = document.createElement("option");
+        option.value = item.key;
+        option.textContent = `${item.mallName} / ${item.planName}`;
+        select.appendChild(option);
+      });
+      if (current && Array.from(select.options).some(i => i.value === current)) {
+        select.value = current;
+      } else {
+        select.value = "auto";
+      }
     }
 
     function toggleMappingDetailActions(enabled) {
@@ -7252,6 +7331,7 @@
     function renderMappingCenter() {
       ensureMappingSelection();
       syncMappingsFromEnabledPlans();
+      refreshExecMappingSelect();
       saveMappingMallsToStorage();
       renderMallOverview();
       const gateway = byId("productsMallGateway");
@@ -8342,6 +8422,21 @@ ${topRisk}`;
         if (rule) {
           setStatus("templateStatus", `当前执行规则：${rule.mallName} / ${rule.ruleName}`, "ok");
         }
+        updateExecFlow();
+        refreshHome();
+      });
+      byId("execMappingSelect").addEventListener("change", () => {
+        state.normalizedOrders = [];
+        state.lastPrecheck = null;
+        state.lastNormalizeMeta = null;
+        state.lastExecutionAt = "";
+        state.exportBlockedReason = "";
+        renderOrderTable();
+        renderPrecheck(null);
+        renderFailedRows(null);
+        renderExecutionSummary(null, null);
+        renderExecConclusion(null);
+        renderSkuMappingSummary(null);
         updateExecFlow();
         refreshHome();
       });
