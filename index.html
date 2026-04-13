@@ -5864,6 +5864,38 @@
       return "";
     }
 
+    function matchFieldByAliases(record, aliases = []) {
+      const dict = {};
+      Object.keys(record || {}).forEach(k => {
+        dict[norm(k)] = k;
+      });
+      const list = Array.isArray(aliases) ? aliases : [];
+      for (const alias of list) {
+        const key = dict[norm(alias)];
+        if (key) return key;
+      }
+      return "";
+    }
+
+    function normalizeRuleFieldList(list, defaults = []) {
+      const rows = Array.isArray(list) && list.length ? list : defaults;
+      return rows
+        .map(item => String(item || "").trim())
+        .filter(Boolean);
+    }
+
+    function normalizeIssueFieldName(field = "") {
+      const key = String(field || "").trim();
+      const aliasMap = {
+        "收货地址": "地址解析",
+        "地址": "地址解析",
+        "省": "地址解析",
+        "市": "地址解析",
+        "区": "地址解析"
+      };
+      return aliasMap[key] || key;
+    }
+
     function normalizeOrders(rows, profile, options = {}) {
       const toggleEl = byId("enableSkuMapping");
       const explicitEnable = Object.prototype.hasOwnProperty.call(options, "enableSkuMapping")
@@ -5872,6 +5904,30 @@
       const enableSkuMapping = explicitEnable === null ? Boolean(toggleEl && toggleEl.checked) : explicitEnable;
       const mappingRows = Array.isArray(options.mappingRows) ? options.mappingRows : state.mappings;
       const mappingMallName = String(options.mappingMallName || "").trim();
+      const validation = profile.validation || {};
+      const blockingFields = normalizeRuleFieldList(validation.blockingFields, ["订单编号", "主商品ID", "商品价格", "商品数量", "收货人", "收货电话", "地址解析"]);
+      const fixableFields = normalizeRuleFieldList(validation.fixableFields, ["收货电话", "地址解析"]);
+      const hintFields = normalizeRuleFieldList(validation.hintFields, ["发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"]);
+      const blockingSet = new Set(blockingFields.map(normalizeIssueFieldName));
+      const fixableSet = new Set(fixableFields.map(normalizeIssueFieldName));
+      const hintSet = new Set(hintFields.map(normalizeIssueFieldName));
+      const mappingKeyCfg = profile.mappingKey || {};
+      const mappingKeyField = String(mappingKeyCfg.field || "外部商品映射键").trim() || "外部商品映射键";
+      const mappingKeyAliases = normalizeRuleFieldList(mappingKeyCfg.aliases, [
+        "外部商品映射键",
+        "物料编码",
+        "商品编码",
+        "外部商品ID",
+        "外部SKU",
+        "外部SKU编码",
+        "SKU",
+        "商品ID",
+        "主商品ID",
+        "material_code",
+        "product_code",
+        "external_sku",
+        "product_id"
+      ]);
       const addressRule = profile.addressRule || {
         sourceField: "收货地址",
         mode: "auto",
@@ -5916,13 +5972,16 @@
       const failedRows = [];
       const allRows = [];
       const passRows = [];
+      const warningRows = [];
+      const hintRows = [];
       rows.forEach(record => {
         const out = {};
         const orderNoKey = matchField(record, "订单编号", profile);
         const qtyKey = matchField(record, "商品数量", profile);
         const consigneeKey = matchField(record, "收货人", profile);
         const phoneKey = matchField(record, "收货电话", profile);
-        const extProductKey = matchField(record, "主商品ID", profile);
+        const directMainProductKey = matchField(record, "主商品ID", profile);
+        const mappingHitKey = matchFieldByAliases(record, mappingKeyAliases);
         const addressKey = matchField(record, "收货地址", profile);
 
         out["订单编号"] = orderNoKey ? String(record[orderNoKey] || "").trim() : "";
@@ -5965,14 +6024,15 @@
         const qty = Number(out["商品数量"] || 0);
         out["商品数量"] = Number.isFinite(qty) && qty > 0 ? String(Math.trunc(qty)) : "";
 
-        const extProductId = extProductKey ? String(record[extProductKey] || "").trim() : "";
+        const externalMappingKey = mappingHitKey ? String(record[mappingHitKey] || "").trim() : "";
+        const directMainProductId = directMainProductKey ? String(record[directMainProductKey] || "").trim() : "";
         out["主商品ID"] = "";
         out["商品名称"] = "";
         out["商品价格"] = "";
         out["指定仓"] = "";
-        if (enableSkuMapping && extProductId) {
+        if (enableSkuMapping && externalMappingKey) {
           mappingCandidateCount += 1;
-          const key = norm(extProductId);
+          const key = norm(externalMappingKey);
           const mappedInfo = mappingIndex.get(key);
           if (mappedInfo) {
             out["主商品ID"] = mappedInfo.sku;
@@ -5985,10 +6045,10 @@
             out["指定仓"] = mappedInfo.warehouse || "";
             mappedCount += 1;
           } else {
-            unmappedIds.add(extProductId);
+            unmappedIds.add(externalMappingKey);
           }
         } else if (!enableSkuMapping) {
-          out["主商品ID"] = extProductId;
+          out["主商品ID"] = directMainProductId || externalMappingKey;
           const nameKey = matchField(record, "商品名称", profile);
           out["商品名称"] = nameKey ? String(record[nameKey] || "").trim() : "";
           const priceKey = matchField(record, "商品价格", profile);
@@ -6009,42 +6069,70 @@
         out["纳税人识别号"] = "";
 
         const reasons = [];
+        const warnings = [];
+        const hints = [];
+        const collectIssue = (field, message) => {
+          const normalizedField = normalizeIssueFieldName(field);
+          requiredMiss[normalizedField] = Number(requiredMiss[normalizedField] || 0) + 1;
+          if (blockingSet.has(normalizedField)) {
+            reasons.push(message);
+            return;
+          }
+          if (fixableSet.has(normalizedField)) {
+            warnings.push(message);
+            return;
+          }
+          if (hintSet.has(normalizedField)) {
+            hints.push(message);
+            return;
+          }
+          warnings.push(message);
+        };
         if (!out["订单编号"]) {
-          reasons.push("订单编号缺失");
-          requiredMiss["订单编号"] += 1;
+          collectIssue("订单编号", "订单编号缺失");
         }
         if (!out["主商品ID"]) {
-          reasons.push(enableSkuMapping ? "商品映射缺失（主商品ID）" : "主商品ID缺失");
-          requiredMiss["主商品ID"] += 1;
+          collectIssue("主商品ID", enableSkuMapping ? `商品映射缺失（${mappingKeyField}）` : "主商品ID缺失");
         }
         if (!out["商品价格"]) {
-          reasons.push("商品价格缺失");
-          requiredMiss["商品价格"] += 1;
+          collectIssue("商品价格", "商品价格缺失");
         }
         if (!out["商品数量"]) {
-          reasons.push("商品数量缺失");
-          requiredMiss["商品数量"] += 1;
+          collectIssue("商品数量", "商品数量缺失");
         }
         if (!out["收货人"]) {
-          reasons.push("收货人缺失");
-          requiredMiss["收货人"] += 1;
+          collectIssue("收货人", "收货人缺失");
         }
         if (!out["收货电话"] || !phoneValid(out["收货电话"])) {
-          reasons.push("收货电话缺失或格式错误");
-          requiredMiss["收货电话"] += 1;
+          collectIssue("收货电话", "收货电话缺失或格式错误");
         }
         if (!out["收货地址"] || !out["省"] || !out["市"] || !out["区"]) {
-          reasons.push("地址解析失败");
-          requiredMiss["地址解析"] += 1;
+          collectIssue("地址解析", "地址解析失败");
         }
 
         allRows.push(out);
+        if (warnings.length) {
+          warningRows.push({
+            sourceRowNo: Number(record.__source_row_no || 0),
+            orderNo: out["订单编号"] || "",
+            warnings
+          });
+        }
+        if (hints.length) {
+          hintRows.push({
+            sourceRowNo: Number(record.__source_row_no || 0),
+            orderNo: out["订单编号"] || "",
+            hints
+          });
+        }
         if (reasons.length) {
           failedRows.push({
             sourceRowNo: Number(record.__source_row_no || 0),
             orderNo: out["订单编号"] || "",
-            externalProductId: extProductId || "",
+            externalProductId: externalMappingKey || directMainProductId || "",
             reasons,
+            warnings,
+            hints,
             row: out
           });
         } else {
@@ -6059,13 +6147,19 @@
         totalRows: rows.length,
         passedRows: passRows.length,
         blockedRows: failedRows.length,
+        warningRows: warningRows.length,
+        hintRows: hintRows.length,
+        blockingFields,
+        fixableFields,
+        hintFields,
         productMapping: {
           enabled: enableSkuMapping,
           candidateCount: mappingCandidateCount,
           mappedCount,
           poolSize: mappingRows.length,
           mallName: mappingMallName,
-          unmappedIds: Array.from(unmappedIds).slice(0, 50)
+          unmappedIds: Array.from(unmappedIds).slice(0, 50),
+          mappingKeyField
         },
         requiredMiss
       };
@@ -6079,6 +6173,8 @@
       const total = normalizeMeta && Number(normalizeMeta.totalRows) >= 0 ? Number(normalizeMeta.totalRows) : rows.length;
       const blockedRows = normalizeMeta && Number(normalizeMeta.blockedRows) >= 0 ? Number(normalizeMeta.blockedRows) : 0;
       const passedRows = normalizeMeta && Number(normalizeMeta.passedRows) >= 0 ? Number(normalizeMeta.passedRows) : rows.length;
+      const warningRows = normalizeMeta && Number(normalizeMeta.warningRows) >= 0 ? Number(normalizeMeta.warningRows) : 0;
+      const hintRows = normalizeMeta && Number(normalizeMeta.hintRows) >= 0 ? Number(normalizeMeta.hintRows) : 0;
       const miss = normalizeMeta && normalizeMeta.requiredMiss ? normalizeMeta.requiredMiss : {};
       const missingByField = {
         "订单编号": Number(miss["订单编号"] || 0),
@@ -6097,12 +6193,15 @@
         total,
         passedRows,
         blockedRows,
+        warningRows,
+        hintRows,
         requiredMissingRows,
         missingByField,
         invalidPhones,
         addressParsed,
         moneyMissingRows,
         addressParsedRate: total ? (addressParsed / total) : 0,
+        blockingFields: normalizeMeta && Array.isArray(normalizeMeta.blockingFields) ? normalizeMeta.blockingFields : [],
         productMapping: normalizeMeta && normalizeMeta.productMapping ? normalizeMeta.productMapping : {
           enabled: false,
           candidateCount: 0,
@@ -6300,10 +6399,19 @@
       const lines = [
         `地址解析成功率：${(precheck.addressParsedRate * 100).toFixed(1)}% (${precheck.addressParsed}/${precheck.total})`,
         `订单实付金额计算失败：${precheck.moneyMissingRows} 行（价格或数量缺失）`,
-        `必填字段缺失明细：${Object.entries(precheck.missingByField).map(([k, v]) => `${k}:${v}`).join(" / ")}`
+        `字段问题明细：${Object.entries(precheck.missingByField).map(([k, v]) => `${k}:${v}`).join(" / ")}`
       ];
+      if (Array.isArray(precheck.blockingFields) && precheck.blockingFields.length) {
+        lines.push(`当前阻断项：${precheck.blockingFields.join(" / ")}`);
+      }
+      if (Number(precheck.warningRows || 0) > 0) {
+        lines.push(`非阻断问题：${precheck.warningRows} 行（warning，不阻断通过）`);
+      }
       if (precheck.productMapping.enabled) {
         lines.push(`商品映射：已映射 ${precheck.productMapping.mappedCount}/${precheck.productMapping.candidateCount}，未映射 ${precheck.productMapping.unmappedIds.length}`);
+        if (precheck.productMapping.mappingKeyField) {
+          lines.push(`映射命中字段：${precheck.productMapping.mappingKeyField}`);
+        }
         if (precheck.productMapping.unmappedIds.length) {
           lines.push(`未映射商品ID样本：${precheck.productMapping.unmappedIds.slice(0, 8).join(", ")}`);
         }
@@ -6481,6 +6589,12 @@
     }
 
     function toRuleProfile(rule) {
+      const validation = rule && rule.validation && typeof rule.validation === "object"
+        ? rule.validation
+        : {};
+      const mappingKey = rule && rule.mappingKey && typeof rule.mappingKey === "object"
+        ? rule.mappingKey
+        : {};
       return {
         name: rule.ruleName || rule.mallName || "未命名规则",
         meta: {
@@ -6501,7 +6615,30 @@
           cityIndex: 2,
           districtIndex: 3
         },
-        enableSkuMapping: rule.enableSkuMapping !== false
+        enableSkuMapping: rule.enableSkuMapping !== false,
+        validation: {
+          blockingFields: normalizeRuleFieldList(validation.blockingFields, ["订单编号", "主商品ID", "商品价格", "商品数量", "收货人", "收货电话", "地址解析"]),
+          fixableFields: normalizeRuleFieldList(validation.fixableFields, ["收货电话", "地址解析"]),
+          hintFields: normalizeRuleFieldList(validation.hintFields, ["发票抬头类型", "发票抬头", "纳税人识别号", "指定仓"])
+        },
+        mappingKey: {
+          field: String(mappingKey.field || "外部商品映射键").trim(),
+          aliases: normalizeRuleFieldList(mappingKey.aliases, [
+            "外部商品映射键",
+            "物料编码",
+            "商品编码",
+            "外部商品ID",
+            "外部SKU",
+            "外部SKU编码",
+            "SKU",
+            "商品ID",
+            "主商品ID",
+            "material_code",
+            "product_code",
+            "external_sku",
+            "product_id"
+          ])
+        }
       };
     }
 
@@ -6558,12 +6695,10 @@
       if (profile.enableSkuMapping !== false && scopedMappings.length === 0) {
         const mallHint = execMallName ? `「${execMallName}」` : "当前";
         if (resolvedMappings.matchMode === "manual") {
-          setStatus("orderStatus", `当前手工选择的商品映射「${resolvedMappings.label || "未命名方案"}」为空，请切换映射或补齐映射后重试。`, "warn");
+          setStatus("orderStatus", `当前手工选择的商品映射「${resolvedMappings.label || "未命名方案"}」为空，将继续执行；未命中映射将按模板阻断规则处理。`, "warn");
         } else {
-          setStatus("orderStatus", `${mallHint}未找到可用商品映射。请在“商品映射中心”新增同名商城，或将映射记录的平台名称调整为${mallHint}。`, "warn");
+          setStatus("orderStatus", `${mallHint}未找到可用商品映射，将继续执行；未命中映射将按模板阻断规则处理。`, "warn");
         }
-        updateExecFlow();
-        return;
       }
       if (resolvedMappings.matchMode === "manual") {
         setStatus("templateStatus", `当前执行规则：${rule.mallName} / ${rule.ruleName}；映射来源：${resolvedMappings.label}`, "ok");
