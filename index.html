@@ -6431,9 +6431,11 @@
       if (!normalizeMeta || !normalizeMeta.productMapping) {
         const execRule = getSelectedExecRule();
         const mallName = execRule ? String(execRule.mallName || "").trim() : "";
-        const scoped = getEnabledMappingsByMallName(mallName);
+        const scopedResult = resolveExecMappings(mallName);
+        const scoped = scopedResult.rows || [];
         const poolLabel = mallName ? `${mallName}商品池` : "当前商品池";
-        box.textContent = `商品池映射状态：等待导单执行。${poolLabel} ${scoped.length} 条。`;
+        const modeHint = scopedResult.matchMode === "platform_name" ? "（按平台名称匹配）" : "";
+        box.textContent = `商品池映射状态：等待导单执行。${poolLabel} ${scoped.length} 条${modeHint}。`;
         box.className = "status sku-summary";
         return;
       }
@@ -6540,12 +6542,18 @@
 
       const profile = toRuleProfile(rule);
       const execMallName = String(rule.mallName || "").trim();
-      const scopedMappings = profile.enableSkuMapping !== false ? getEnabledMappingsByMallName(execMallName) : [];
+      const resolvedMappings = profile.enableSkuMapping !== false
+        ? resolveExecMappings(execMallName)
+        : { rows: [], matchMode: "none" };
+      const scopedMappings = resolvedMappings.rows || [];
       if (profile.enableSkuMapping !== false && scopedMappings.length === 0) {
         const mallHint = execMallName ? `「${execMallName}」` : "当前";
-        setStatus("orderStatus", `${mallHint}商城商品池为空。请先在“商品映射中心”维护该商城映射。`, "warn");
+        setStatus("orderStatus", `${mallHint}未找到可用商品映射。请在“商品映射中心”新增同名商城，或将映射记录的平台名称调整为${mallHint}。`, "warn");
         updateExecFlow();
         return;
+      }
+      if (resolvedMappings.matchMode === "platform_name") {
+        setStatus("templateStatus", `已按平台名称匹配商品映射：${execMallName}`, "ok");
       }
       let sourceRows = [];
       let sourceHint = "";
@@ -6895,6 +6903,27 @@
       return enabledPlan.items
         .filter(item => item.enabled !== false)
         .map(item => cloneMappingItem(item));
+    }
+
+    function resolveExecMappings(mallName = "") {
+      const targetMall = String(mallName || "").trim();
+      if (!targetMall) {
+        return {
+          rows: state.mappings.filter(item => item.enabled !== false).map(item => cloneMappingItem(item)),
+          matchMode: "global"
+        };
+      }
+      const byMall = getEnabledMappingsByMallName(targetMall);
+      if (byMall.length) {
+        return { rows: byMall, matchMode: "mall_name" };
+      }
+      const byPlatform = state.mappings
+        .filter(item => item.enabled !== false && String(item.platform_name || "").trim() === targetMall)
+        .map(item => cloneMappingItem(item));
+      if (byPlatform.length) {
+        return { rows: byPlatform, matchMode: "platform_name" };
+      }
+      return { rows: [], matchMode: "none" };
     }
 
     function toggleMappingDetailActions(enabled) {
